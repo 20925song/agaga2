@@ -1,3 +1,13 @@
+import re
+import pandas as pd
+import streamlit as st  # ⭕ 반드시 st 데코레이터 사용 전에 임포트되어야 합니다.
+import plotly.express as px
+from mlxtend.frequent_patterns import apriori, association_rules
+from mlxtend.preprocessing import TransactionEncoder
+
+# 페이지 기본 설정
+st.set_page_config(page_title="급식 규칙 찾기", layout="wide")
+st.title("🍽️ 송탄고 급식 연관 규칙 분석") 
 @st.cache_data
 def generate_rules(transactions):
     te = TransactionEncoder()
