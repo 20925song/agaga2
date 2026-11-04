@@ -1,144 +1,58 @@
+# main.py — 급식 규칙 찾기: 같은 날 함께 나온 메뉴 쌍을 센다
 import re
+from collections import Counter
+from itertools import combinations
+
 import pandas as pd
-import streamlit as st
 import plotly.express as px
-from mlxtend.frequent_patterns import apriori, association_rules
-from mlxtend.preprocessing import TransactionEncoder
+import streamlit as st
 
-# 1. 페이지 기본 설정
-st.set_page_config(page_title="급식 규칙 찾기", layout="wide")
-st.title("🍽️ 송탄고 급식 연관 규칙 분석")
+URL = "https://raw.githubusercontent.com/it-teacher-go/data-share-/main/songtan_meals_184.csv"
 
-# 2. 데이터 로드 및 전처리
-DATA_URL = "https://raw.githubusercontent.com/it-teacher-go/data-share-/main/songtan_meals_184.csv"
+st.title("🍚 급식 규칙 찾기")
 
-@st.cache_data
-def load_and_preprocess_data(url):
-    df = pd.read_csv(url, encoding="utf-8")
-    
-    transactions = []
-    all_menus = set()
-    
-    for raw_menu in df["메뉴"].dropna():
-        # 메뉴 이름에서 괄호 및 괄호 안 내용 제거, 양끝 공백 제거
-        items = [re.sub(r"\(.*?\)", "", item).strip() for item in str(raw_menu).split("|")]
-        # 빈 문자열 제외 및 중복 제거
-        items = list(set([item for item in items if item]))
-        
-        if items:
-            transactions.append(items)
-            all_menus.update(items)
-            
-    return df, transactions, sorted(list(all_menus))
 
-@st.cache_data
-def generate_rules(transactions):
-    te = TransactionEncoder()
-    te_ary = te.fit(transactions).transform(transactions)
-    df_encoded = pd.DataFrame(te_ary, columns=te.columns_)
-    
-    # 1개짜리 항목을 포함한 모든 빈발 항목집합 생성 (최소 지지도: 184일 중 2번 이상 동시 출현 ≈ 0.01)
-    frequent_itemsets = apriori(df_encoded, min_support=0.01, use_colnames=True)
-    
-    if frequent_itemsets.empty:
-        return pd.DataFrame()
-        
-    # 연관 규칙 생성
-    rules = association_rules(frequent_itemsets, metric="lift", min_threshold=0.0, support_only=False)
-    
-    if rules.empty:
-        return pd.DataFrame()
+@st.cache_data(ttl=3600)
+def load_baskets(url):
+    table = pd.read_csv(url, encoding="utf-8")
+    baskets = []
+    for line in table["메뉴"]:
+        names = set()
+        for dish in str(line).split("|"):
+            name = re.sub(r"\([^)]*\)", "", dish).strip()   # 괄호와 그 안의 내용은 제외한다
+            if name:
+                names.add(name)
+        if names:
+            baskets.append(sorted(names))
+    return baskets
 
-    # 조건 1개, 결과 1개로 이루어진 메뉴 쌍 규칙만 필터링
-    rules = rules[
-        (rules["antecedents"].apply(lambda x: len(x) == 1)) & 
-        (rules["consequents"].apply(lambda x: len(x) == 1))
-    ].copy()
 
-    # 조건/결과 텍스트 변환 및 동시 출현 횟수 계산
-    rules["조건"] = rules["antecedents"].apply(lambda x: list(x)[0])
-    rules["결과"] = rules["consequents"].apply(lambda x: list(x)[0])
-    rules["동시"] = (rules["support"] * len(transactions)).round().astype(int)
-    
-    rules["지지도"] = rules["support"]
-    rules["신뢰도"] = rules["confidence"]
-    rules["향상도"] = rules["lift"]
-    
-    result_df = rules[["조건", "결과", "동시", "지지도", "신뢰도", "향상도"]].copy()
-    return result_df
+baskets = load_baskets(URL)
+n = len(baskets)
+single = Counter(item for basket in baskets for item in basket)           # 메뉴가 나온 날 수
+pair = Counter(c for basket in baskets for c in combinations(basket, 2))  # 두 메뉴가 함께 나온 날 수
 
-# 데이터 읽기 및 규칙 생성 실행
-raw_df, transactions, menu_list = load_and_preprocess_data(DATA_URL)
-rules_df = generate_rules(transactions)
+rows = []
+for (a, b), together in pair.items():
+    for x, y in [(a, b), (b, a)]:              # 한 쌍에서 두 방향의 규칙이 나온다
+        rows.append({"조건": x, "결과": y, "동시": together,
+                     "지지도": round(together / n, 3),
+                     "신뢰도": round(together / single[x], 3),
+                     "향상도": round((together / single[x]) / (single[y] / n), 2)})
+규칙 = pd.DataFrame(rows, columns=["조건", "결과", "동시", "지지도", "신뢰도", "향상도"])
 
-# 기본 통계 계산
-total_days = len(transactions)
-total_menu_types = len(menu_list)
+st.caption(f"급식 {n}일 · 메뉴 {len(single)}종 · 함께 나온 적이 있는 메뉴 쌍 {len(pair):,}개 · "
+           f"규칙 {len(규칙):,}개")
 
-# 중복 없는 무방향 메뉴 쌍 수 계산
-if not rules_df.empty:
-    unique_pairs_count = len(rules_df[['조건', '결과']].apply(lambda x: tuple(sorted(x)), axis=1).unique())
-else:
-    unique_pairs_count = 0
+기준 = st.radio("정렬", ["향상도 순", "신뢰도 순", "동시 순"], horizontal=True)
+메뉴 = st.selectbox("메뉴로 좁혀 보기", ["(전체)"] + sorted(single))
+보기 = 규칙 if 메뉴 == "(전체)" else 규칙[(규칙["조건"] == 메뉴) | (규칙["결과"] == 메뉴)]
+보기 = 보기.sort_values({"향상도 순": "향상도", "신뢰도 순": "신뢰도", "동시 순": "동시"}[기준],
+                    ascending=False, ignore_index=True)
+st.dataframe(보기, width="stretch", hide_index=True)
 
-# 상단 요약 정보 출력
-st.markdown(f"**급식 일수:** {total_days}일 | **메뉴 종류 수:** {total_menu_types}개 | **함께 나온 적이 있는 메뉴 쌍의 수:** {unique_pairs_count}쌍")
-st.divider()
-
-# 컨트롤레이아웃 (메뉴 검색 및 정렬)
-col1, col2 = st.columns([1, 1])
-
-with col1:
-    selected_menu = st.selectbox("특정 메뉴가 포함된 규칙만 보기", ["전체 보기"] + menu_list)
-
-with col2:
-    sort_option = st.selectbox("정렬 기준 선택", ["향상도 순", "신뢰도 순", "동시 순"])
-
-# 데이터 필터링 (선택한 메뉴가 조건이나 결과에 포함된 규칙)
-filtered_df = rules_df.copy()
-if selected_menu != "전체 보기":
-    filtered_df = filtered_df[(filtered_df["조건"] == selected_menu) | (filtered_df["결과"] == selected_menu)]
-
-# 데이터 정렬
-sort_mapping = {
-    "향상도 순": "향상도",
-    "신뢰도 순": "신뢰도",
-    "동시 순": "동시"
-}
-filtered_df = filtered_df.sort_values(by=sort_mapping[sort_option], ascending=False).reset_index(drop=True)
-
-# 시각화 (향상도 상위 10개 가로 막대그래프)
-st.subheader("📊 향상도 상위 10개 규칙")
-if not filtered_df.empty:
-    top_10_df = filtered_df.sort_values(by="향상도", ascending=False).head(10).copy()
-    top_10_df["규칙"] = top_10_df["조건"] + " ➔ " + top_10_df["결과"]
-    
-    # 그래프에서 위쪽부터 상위 순서대로 표시되도록 정렬
-    top_10_df = top_10_df.sort_values(by="향상도", ascending=True)
-
-    fig = px.bar(
-        top_10_df,
-        x="향상도",
-        y="규칙",
-        orientation="h",
-        text="향상도",
-        color="향상도",
-        color_continuous_scale="Viridis",
-        labels={"향상도": "향상도 (Lift)", "규칙": "연관 규칙 (조건 ➔ 결과)"}
-    )
-    fig.update_traces(texttemplate="%{text:.2f}", textposition="outside")
-    fig.update_layout(height=400, showlegend=False, yaxis={'categoryorder':'array', 'categoryarray': top_10_df['규칙']})
-    st.plotly_chart(fig, use_container_width=True)
-else:
-    st.info("조건에 해당하는 규칙이 없습니다.")
-
-# 연관 규칙 목록 표 출력
-st.subheader("📋 연관 규칙 목록")
-st.dataframe(
-    filtered_df.style.format({
-        "지지도": "{:.4f}",
-        "신뢰도": "{:.4f}",
-        "향상도": "{:.2f}"
-    }),
-    use_container_width=True
-)
+top = 보기.sort_values("향상도", ascending=False).head(10).copy()
+top["규칙"] = top["조건"] + " → " + top["결과"]
+fig = px.bar(top, x="향상도", y="규칙", orientation="h", text="향상도")
+fig.update_layout(yaxis={"categoryorder": "total ascending"}, height=420)
+st.plotly_chart(fig, width="stretch")
